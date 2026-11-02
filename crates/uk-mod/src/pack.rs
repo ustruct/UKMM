@@ -480,6 +480,7 @@ impl ModPacker {
                     .ok()
             });
         log::trace!("Resource {} has a master: {}", &canon, reference.is_some());
+        let full = resource.as_mergeable().cloned();
         if let (Some(res), Some(ref_res)) = (
             resource.as_mergeable(),
             reference.as_ref().and_then(|rrd| rrd.as_mergeable()),
@@ -507,6 +508,23 @@ impl ModPacker {
             if ref_bin == bin {
                 log::trace!("{} not modded, skipping", &canon);
                 return Ok(());
+            }
+        }
+
+        // Some diffs can't be read back after serializing (usually unusual
+        // or partly broken files). Store those as a full binary override
+        // instead of writing a resource that fails at deploy time.
+        let round_trips = minicbor_ser::to_vec(&resource)
+            .ok()
+            .map(|data| minicbor_ser::from_slice::<ResourceData>(&data).is_ok())
+            .unwrap_or(false);
+        if !round_trips {
+            if let Some(full) = full {
+                log::warn!("{} can't be stored as a mergeable resource, storing it as-is", &canon);
+                resource = ResourceData::Mergeable(uk_content::resource::MergeableResource::BinaryOverride(Box::new((
+                    full.into_binary(self.endian),
+                    "Stored as-is".into(),
+                ))));
             }
         }
 

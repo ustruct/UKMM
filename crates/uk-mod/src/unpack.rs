@@ -670,22 +670,15 @@ impl ModUnpacker {
             })
             .flatten()
         {
-            let res = minicbor_ser::from_slice(&data);
+            let res = minicbor_ser::from_slice::<ResourceData>(&data);
             match res {
                 Ok(res) => versions.push_back(Arc::new(res)),
                 Err(e) => {
-                    let msg = format!("{}", e);
-                    if msg.contains("unknown variant") {
-                        bail!(
-                            "Error deserializing resource {canon} from mod {mod_}. This is \
-                             probably because this mod was built with an old, incompatible beta \
-                             of UKMM."
-                        );
-                    } else {
-                        bail!(
-                            "Error deserializing resource {canon} from mod {mod_}. Error: {e}"
-                        );
-                    }
+                    // One unreadable file shouldn't stop the whole deploy.
+                    log::warn!(
+                        "Skipped {canon} from {mod_} because it couldn't be read ({e}). \
+                         Reinstalling the mod usually fixes this."
+                    );
                 }
             }
         }
@@ -774,9 +767,13 @@ impl ModUnpacker {
     fn build_sarc(&self, sarc: SarcMap, aoc: bool) -> Result<Vec<u8>> {
         let mut writer = SarcWriter::new(self.endian.into()).with_min_alignment(sarc.alignment);
         for file in sarc.files.into_iter() {
-            let data = self
-                .build_file(&file, aoc)
-                .with_context(|| jstr!("Failed to build file {&file} for SARC"))?;
+            let data = match self.build_file(&file, aoc) {
+                Ok(data) => data,
+                Err(e) => {
+                    log::warn!("Left {file} out of a SARC because it couldn't be built: {e:?}");
+                    continue;
+                }
+            };
             writer.add_file(
                 file.as_str(),
                 compress_if(data.as_ref(), file.as_str()).as_ref(),
