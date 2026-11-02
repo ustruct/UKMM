@@ -1,3 +1,5 @@
+pub mod bntx;
+
 use roead::sarc::*;
 use serde::{Deserialize, Serialize};
 use smartstring::alias::String;
@@ -40,12 +42,19 @@ impl Mergeable for LayoutArchive {
         Self(
             keys.into_iter()
                 .map(|k| {
-                    let v = diff
-                        .0
-                        .get(&k)
-                        .or_else(|| self.0.get(&k))
-                        .map(|v| v.to_vec())
-                        .expect("Layout archive merging failed");
+                    // Texture atlases are merged texture by texture, so two mods that
+                    // each change different textures in the same BNTX both apply.
+                    let v = match (self.0.get(&k), diff.0.get(&k)) {
+                        (Some(base), Some(new)) if k.ends_with(".bntx") && base != new => {
+                            bntx::merge_bntx(base, new).unwrap_or_else(|| {
+                                log::warn!("Could not merge texture atlas {k}, replacing it");
+                                new.to_vec()
+                            })
+                        }
+                        (_, Some(new)) => new.to_vec(),
+                        (Some(base), None) => base.to_vec(),
+                        (None, None) => unreachable!("Layout archive merging failed"),
+                    };
                     (k, v)
                 })
                 .collect(),
