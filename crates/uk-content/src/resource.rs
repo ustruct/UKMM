@@ -729,14 +729,28 @@ impl Mergeable for SarcMap {
     fn diff(&self, other: &Self) -> Self {
         Self {
             alignment: self.alignment,
-            files:     self.files.diff(&other.files),
+            files:     other
+                .files
+                .iter()
+                .filter(|file| !self.files.contains(*file))
+                .cloned()
+                .collect(),
         }
     }
 
     fn merge(&self, diff: &Self) -> Self {
+        // A SARC diff only lists added files. Files a mod leaves out are never
+        // treated as deletions, so packs like Bootup.pack keep their stock contents.
+        let mut files = self.files.clone();
+        files.extend(
+            diff.files
+                .iter_full()
+                .filter(|(file, deleted)| !**deleted && !self.files.contains(*file))
+                .map(|(file, _)| file.clone()),
+        );
         Self {
             alignment: self.alignment,
-            files:     self.files.merge(&diff.files),
+            files,
         }
     }
 }
