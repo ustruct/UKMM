@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Context;
 use join_str::jstr;
 pub use msyt::{
-    model::{Entry, MsbtInfo},
+    model::{Content, Entry, MsbtInfo},
     Endianness, Msyt,
 };
 use roead::sarc::{Sarc, SarcWriter};

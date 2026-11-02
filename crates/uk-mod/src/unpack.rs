@@ -433,6 +433,23 @@ static RSTB_EXCLUDE_EXTS: &[&str] = &[
 ];
 static RSTB_EXCLUDE_NAMES: &[&str] = &["ActorInfo.product.byml"];
 
+/// Output and stock sizes (decompressed) of every file that got an RSTB
+/// entry during the last unpack, for tools that patch the RSTB themselves.
+pub static RSTB_SIZE_HINTS: std::sync::LazyLock<DashMap<String, (u32, u32)>> =
+    std::sync::LazyLock::new(DashMap::new);
+
+fn decompressed_len(data: &[u8]) -> usize {
+    if data.len() >= 8 && &data[..4] == b"Yaz0" {
+        u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize
+    } else {
+        data.len()
+    }
+}
+
+fn is_version_file(file: &str) -> bool {
+    matches!(file, "System/Version.txt" | "System/AocVersion.txt")
+}
+
 // #[derive(Debug)]
 pub struct ModUnpacker {
     dump:     Arc<ResourceReader>,
@@ -443,6 +460,8 @@ pub struct ModUnpacker {
     rstb:     DashMap<String, Option<u32>>,
     hashes:   StockHashTable,
     out_dir:  PathBuf,
+    text_overrides: Vec<(std::string::String, std::string::String, std::string::String)>,
+    skip_version_files: bool,
 }
 
 impl ModUnpacker {
@@ -465,6 +484,8 @@ impl ModUnpacker {
                 Endian::Big => botw_utils::hashes::Platform::WiiU,
             }),
             out_dir,
+            text_overrides: Vec::new(),
+            skip_version_files: false,
         }
     }
 
@@ -473,12 +494,26 @@ impl ModUnpacker {
         self
     }
 
+    /// Replaces the text of one message entry in the merged language pack.
+    pub fn with_text_override(mut self, file: &str, label: &str, text: &str) -> Self {
+        self.text_overrides.push((file.into(), label.into(), text.into()));
+        self
+    }
+
+    /// Leaves System/Version.txt and System/AocVersion.txt out of the output,
+    /// for games or ports that check those files.
+    pub fn without_version_files(mut self) -> Self {
+        self.skip_version_files = true;
+        self
+    }
+
     pub fn unpack(self) -> Result<DashMap<String, Option<u32>>> {
+        RSTB_SIZE_HINTS.clear();
         if !self.out_dir.exists() {
             fs::create_dir_all(&self.out_dir)?;
         }
         let mut content_files: BTreeSet<&String>;
-        let aoc_files: BTreeSet<&String>;
+        let mut aoc_files: BTreeSet<&String>;
         if let Some(manifest) = self.manifest.as_ref() {
             content_files = manifest.content_files.iter().collect();
             aoc_files = manifest.aoc_files.iter().collect();
@@ -493,6 +528,10 @@ impl ModUnpacker {
                 .iter()
                 .flat_map(|mod_| mod_.manifest.aoc_files.iter())
                 .collect();
+        }
+        if self.skip_version_files {
+            content_files.retain(|f| !is_version_file(f));
+            aoc_files.retain(|f| !is_version_file(f));
         }
         let mut modded_langs: IndexSet<Language> = Default::default();
         for lang in self.mods.iter().flat_map(|m| m.manifest.languages()) {
@@ -553,7 +592,7 @@ impl ModUnpacker {
     }
 
     fn unpack_texts(&self, mut langs: IndexSet<Language>) -> Result<()> {
-        if !langs.is_empty() {
+        if !langs.is_empty() || !self.text_overrides.is_empty() {
             log::info!("Unpacking game texts");
             let Some(MergeableResource::MessagePack(mut base)) = ResourceData::clone(
                 self.dump
@@ -580,6 +619,13 @@ impl ModUnpacker {
                             *base = base.merge(&version);
                         }
                         break;
+                    }
+                }
+            }
+            for (file, label, text) in &self.text_overrides {
+                if let Some(msyt) = base.0.get_mut(file.as_str()) {
+                    if let Some(entry) = msyt.entries.get_mut(label.as_str()) {
+                        entry.contents = vec![uk_content::message::Content::Text(text.clone())];
                     }
                 }
             }
@@ -824,6 +870,15 @@ impl ModUnpacker {
             }
         };
         if let Some(val) = rstb_val {
+            if let Ok(game) = self.dump.get_bytes_uncached(&filepath) {
+                RSTB_SIZE_HINTS.insert(
+                    canon.clone(),
+                    (
+                        decompressed_len(&data).min(u32::MAX as usize) as u32,
+                        decompressed_len(&game).min(u32::MAX as usize) as u32,
+                    ),
+                );
+            }
             self.rstb.insert(canon, val);
         }
         Ok(data)
