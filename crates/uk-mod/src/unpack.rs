@@ -629,6 +629,45 @@ impl ModUnpacker {
         })
     }
 
+    /// Drops copies of stock files (and stock files inside layout archives)
+    /// that mods sometimes ship, so they don't override other mods' changes.
+    fn strip_stock_entries(
+        &self,
+        canon: &str,
+        has_base: bool,
+        res: ResourceData,
+    ) -> Option<ResourceData> {
+        match res {
+            ResourceData::Binary(ref data)
+                if has_base && !self.hashes.is_file_modded(canon, data.as_slice(), true) =>
+            {
+                log::debug!("Skipping stock copy of {canon} from mod");
+                None
+            }
+            ResourceData::Mergeable(MergeableResource::LayoutArchive(mut la)) => {
+                let before = la.0.len();
+                la.0.retain(|name, data| {
+                    self.hashes
+                        .is_file_modded(name.as_str(), data.as_slice(), true)
+                });
+                if la.0.len() != before {
+                    log::debug!(
+                        "Dropped {} stock layout file(s) from mod diff",
+                        before - la.0.len()
+                    );
+                }
+                if la.0.is_empty() {
+                    None
+                } else {
+                    Some(ResourceData::Mergeable(MergeableResource::LayoutArchive(
+                        la,
+                    )))
+                }
+            }
+            other => Some(other),
+        }
+    }
+
     fn build_file(&self, file: &str, aoc: bool) -> Result<Vec<u8>> {
         let mut versions = std::collections::VecDeque::with_capacity(
             (self.mods.len() as f32 / 2.).ceil() as usize,
@@ -660,6 +699,7 @@ impl ModUnpacker {
                 dump_error.push(e.into());
             }
         }
+        let has_base = !versions.is_empty();
         for (data, mod_) in self
             .mods
             .iter()
@@ -672,7 +712,32 @@ impl ModUnpacker {
         {
             let res = minicbor_ser::from_slice::<ResourceData>(&data);
             match res {
-                Ok(res) => versions.push_back(Arc::new(res)),
+                Ok(res) => {
+                    // A mod that ships a full binary copy of a mergeable file
+                    // (common in mods converted from other formats) is merged as
+                    // a diff against the stock file instead of overriding it.
+                    let converted = match (&res, versions.front().and_then(|b| b.as_mergeable())) {
+                        (ResourceData::Binary(data), Some(base)) if has_base => {
+                            MergeableResource::from_binary(canon_path, data)
+                                .ok()
+                                .flatten()
+                                .filter(|parsed| {
+                                    std::mem::discriminant(parsed) == std::mem::discriminant(base)
+                                })
+                                .map(|parsed| {
+                                    log::info!(
+                                        "Merging the full copy of {canon} from {mod_} as changes"
+                                    );
+                                    ResourceData::Mergeable(base.diff(&parsed))
+                                })
+                        }
+                        _ => None,
+                    };
+                    let res = converted.unwrap_or(res);
+                    if let Some(res) = self.strip_stock_entries(&canon, has_base, res) {
+                        versions.push_back(Arc::new(res));
+                    }
+                }
                 Err(e) => {
                     // One unreadable file shouldn't stop the whole deploy.
                     log::warn!(
